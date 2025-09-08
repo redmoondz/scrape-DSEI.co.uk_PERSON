@@ -55,8 +55,9 @@ class DSEISpeakerScraper:
         return None
     
     def extract_speakers_slugs_from_page(self, soup: BeautifulSoup) -> List[SpeakerSlug]:
-        """Извлекает slug спикеров со страницы списка"""
+        """Извлекает список slug спикеров со страницы"""
         slugs = []
+        seen_slugs = set()  # Для более эффективной дедупликации по slug
         
         # Ищем все ссылки с JavaScript функцией openRemoteModal
         speaker_links = soup.find_all('a')
@@ -71,7 +72,9 @@ class DSEISpeakerScraper:
                 
             slug = extract_slug_from_javascript(str(href))
             
-            if slug:
+            if slug and slug not in seen_slugs:  # Проверяем только по slug
+                seen_slugs.add(slug)
+                
                 # Попробуем получить имя спикера
                 name = ""
                 # Ищем в aria-label
@@ -85,34 +88,40 @@ class DSEISpeakerScraper:
                         name = clean_text(text_content)
                 
                 speaker_slug = SpeakerSlug(slug=slug, name=name)
-                if speaker_slug not in slugs:  # Избегаем дубликатов
-                    slugs.append(speaker_slug)
-                    self.logger.info(f"Найден спикер: {name} (slug: {slug})")
+                slugs.append(speaker_slug)
+                self.logger.info(f"Найден спикер: {name} (slug: {slug})")
         
         return slugs
     
-    def check_for_next_page(self, soup: BeautifulSoup) -> bool:
+    def check_for_next_page(self, soup: BeautifulSoup, current_page: int) -> bool:
         """Проверяет есть ли следующая страница"""
-        # Ищем элементы пагинации
-        pagination = soup.find('div', class_='pagination') or soup.find('nav', class_='pagination')
-        if pagination and isinstance(pagination, Tag):
-            # Упрощенная проверка на следующую страницу
-            next_buttons = pagination.find_all('a')
-            for btn in next_buttons:
-                if isinstance(btn, Tag):
-                    btn_text = btn.get_text().strip().lower()
-                    if 'next' in btn_text or '>' in btn_text:
-                        return True
+        # Ищем все ссылки с page= в href
+        all_links = soup.find_all('a', href=True)
+        page_numbers = []
         
-        # Альтернативный способ - проверка наличия спикеров на странице
-        speaker_items = soup.find_all('div', class_='m-speakers-list__items__item')
-        return len(speaker_items) > 0
+        for link in all_links:
+            href = link.get('href', '')
+            if 'page=' in href:
+                try:
+                    # Извлекаем номер страницы из href
+                    page_num = int(href.split('page=')[1].split('&')[0])
+                    page_numbers.append(page_num)
+                except (ValueError, IndexError):
+                    continue
+        
+        if page_numbers:
+            max_page = max(page_numbers)
+            self.logger.info(f"Максимальная страница: {max_page}, текущая: {current_page}")
+            return current_page < max_page
+        
+        return False
     
     def scrape_speakers_list(self) -> List[SpeakerSlug]:
         """Этап 1: Получение списка всех спикеров и их slug"""
         self.logger.info("=== ЭТАП 1: Получение списка спикеров ===")
         
         all_slugs = []
+        seen_slugs = set()  # Глобальная дедупликация между страницами
         page = 1
         
         while True:
@@ -133,12 +142,19 @@ class DSEISpeakerScraper:
             if not page_slugs:
                 self.logger.info(f"На странице {page} не найдено спикеров. Завершение.")
                 break
-                
-            all_slugs.extend(page_slugs)
-            self.logger.info(f"На странице {page} найдено {len(page_slugs)} спикеров")
+            
+            # Фильтруем дубликаты между страницами
+            new_slugs = []
+            for speaker_slug in page_slugs:
+                if speaker_slug.slug not in seen_slugs:
+                    seen_slugs.add(speaker_slug.slug)
+                    new_slugs.append(speaker_slug)
+            
+            all_slugs.extend(new_slugs)
+            self.logger.info(f"На странице {page} найдено {len(page_slugs)} спикеров ({len(new_slugs)} новых)")
             
             # Проверяем есть ли следующая страница
-            if not self.check_for_next_page(soup):
+            if not self.check_for_next_page(soup, page):
                 self.logger.info("Достигнута последняя страница")
                 break
                 
